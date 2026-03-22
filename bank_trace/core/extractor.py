@@ -26,19 +26,11 @@ STATEMENT_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 
 def normalize_contract_token(value: str) -> str:
-    """Normalize a contract token for resilient text matching.
-
-    Formatting characters and separator variants are removed so contracts can
-    still be matched against imperfect PDF or OCR text.
-
-    :param value: Raw contract number text.
-    :returns: Uppercase alphanumeric search token.
-    """
+    """Normalize a contract token for resilient text matching."""
 
     uppercase = value.upper().strip()
     uppercase = (
-        uppercase
-        .replace("–", "-")
+        uppercase.replace("–", "-")
         .replace("—", "-")
         .replace("−", "-")
         .replace("_", "-")
@@ -47,16 +39,11 @@ def normalize_contract_token(value: str) -> str:
 
 
 def normalize_text_for_search(value: str) -> str:
-    """Normalize page text into a contract-searchable token stream.
-
-    :param value: Raw text extracted from a PDF line.
-    :returns: Uppercase alphanumeric text without formatting characters.
-    """
+    """Normalize extracted PDF text for tolerant matching."""
 
     uppercase = value.upper()
     uppercase = (
-        uppercase
-        .replace("–", "-")
+        uppercase.replace("–", "-")
         .replace("—", "-")
         .replace("−", "-")
         .replace("_", "-")
@@ -65,12 +52,7 @@ def normalize_text_for_search(value: str) -> str:
 
 
 def extract_statement_label(text: str, fallback: str) -> str:
-    """Extract a statement identifier from page text.
-
-    :param text: Text content of the statement page.
-    :param fallback: Value returned when no known label pattern matches.
-    :returns: Extracted statement label or the fallback value.
-    """
+    """Extract a statement label from page text."""
 
     for pattern in STATEMENT_PATTERNS:
         match = pattern.search(text)
@@ -80,21 +62,13 @@ def extract_statement_label(text: str, fallback: str) -> str:
 
 
 def find_amounts_in_text(text: str) -> list[str]:
-    """Return all amount-like values found in a text fragment.
-
-    :param text: Text that may contain localized currency values.
-    :returns: Matched amounts in discovery order.
-    """
+    """Return all amount-like values found in text."""
 
     return AMOUNT_PATTERN.findall(text)
 
 
 def parse_date_string(value: str) -> datetime | None:
-    """Parse a supported date string into a :class:`datetime` object.
-
-    :param value: Candidate date string.
-    :returns: Parsed date or ``None`` when no supported format matches.
-    """
+    """Parse a supported date string."""
 
     formats = ("%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d")
 
@@ -107,34 +81,12 @@ def parse_date_string(value: str) -> datetime | None:
     return None
 
 
-def find_best_date_in_context(lines: list[str], hit_index: int) -> tuple[str, str]:
-    """Find the nearest valid booking date around a matched contract line.
+def find_best_date_in_text(text: str) -> tuple[str, str]:
+    """Find the first valid date in a text fragment."""
 
-    :param lines: All text lines from the current PDF page.
-    :param hit_index: Index of the line containing the contract match.
-    :returns: Tuple of formatted booking date and booking month.
-    """
-
-    candidate_indices = [
-        hit_index,
-        hit_index + 1,
-        hit_index + 2,
-        hit_index - 1,
-        hit_index - 2,
-    ]
-
-    for index in candidate_indices:
-        if index < 0 or index >= len(lines):
-            continue
-
-        line = lines[index]
-
-        for pattern in DATE_PATTERNS:
-            match = pattern.search(line)
-            if not match:
-                continue
-
-            raw_date = match.group(1)
+    for pattern in DATE_PATTERNS:
+        matches = pattern.findall(text)
+        for raw_date in matches:
             parsed_date = parse_date_string(raw_date)
             if parsed_date is None:
                 continue
@@ -144,48 +96,122 @@ def find_best_date_in_context(lines: list[str], hit_index: int) -> tuple[str, st
                 parsed_date.strftime("%Y-%m"),
             )
 
-    return ("", "")
+    return "", ""
 
 
-def find_best_amount_in_context(lines: list[str], hit_index: int) -> str | None:
-    """Find the nearest amount around a matched contract line.
+def find_best_amount_in_text(text: str) -> str | None:
+    """Find the most likely amount in a text fragment."""
 
-    :param lines: All text lines from the current PDF page.
-    :param hit_index: Index of the line containing the contract match.
-    :returns: Best matching amount or ``None`` when no amount is found nearby.
+    amounts = find_amounts_in_text(text)
+    if not amounts:
+        return None
+    return amounts[-1]
+
+
+def build_context_text(lines: list[str], start_index: int, end_index: int) -> str:
+    """Build a compact context string from a line window."""
+
+    return " | ".join(
+        line.strip() for line in lines[start_index:end_index] if line.strip()
+    ).strip()
+
+
+def find_contract_windows(
+    lines: list[str],
+    normalized_contract: str,
+    min_window_size: int = 1,
+    max_window_size: int = 8,
+) -> list[tuple[int, int]]:
+    """Find windows of consecutive lines containing a contract token."""
+
+    windows: list[tuple[int, int]] = []
+    line_count = len(lines)
+
+    for window_size in range(min_window_size, max_window_size + 1):
+        for start_index in range(line_count):
+            end_index = start_index + window_size
+            if end_index > line_count:
+                break
+
+            window_text = " ".join(lines[start_index:end_index])
+            normalized_window = normalize_text_for_search(window_text)
+
+            if normalized_contract in normalized_window:
+                windows.append((start_index, end_index))
+
+    return windows
+
+
+def choose_best_window(
+    lines: list[str],
+    windows: list[tuple[int, int]],
+) -> tuple[int, int] | None:
+    """Choose the most useful match window."""
+
+    if not windows:
+        return None
+
+    ranked_windows: list[tuple[int, int, int, int]] = []
+
+    for start_index, end_index in windows:
+        window_text = " ".join(lines[start_index:end_index])
+        has_amount = 1 if find_best_amount_in_text(window_text) is not None else 0
+        has_date = 1 if find_best_date_in_text(window_text)[0] else 0
+        window_length = end_index - start_index
+        ranked_windows.append((has_amount, has_date, -window_length, start_index))
+
+    ranked_windows.sort(reverse=True)
+
+    _, _, _, best_start = ranked_windows[0]
+
+    for start_index, end_index in windows:
+        if start_index == best_start:
+            return start_index, end_index
+
+    return windows[0]
+
+
+def find_best_date_in_lines(
+    lines: list[str],
+    start_index: int,
+    end_index: int,
+    max_padding: int = 6,
+) -> tuple[str, str]:
+    """Find the nearest valid date around a match window.
+
+    The search starts inside the match window and then expands outward.
     """
 
-    candidate_indices = [
-        hit_index,
-        hit_index + 1,
-        hit_index + 2,
-        hit_index - 1,
-        hit_index - 2,
-    ]
+    for padding in range(0, max_padding + 1):
+        expanded_start = max(0, start_index - padding)
+        expanded_end = min(len(lines), end_index + padding)
+        text = " ".join(lines[expanded_start:expanded_end])
 
-    for index in candidate_indices:
-        if index < 0 or index >= len(lines):
-            continue
+        booking_date, booking_month = find_best_date_in_text(text)
+        if booking_date:
+            return booking_date, booking_month
 
-        amounts = find_amounts_in_text(lines[index])
-        if amounts:
-            return amounts[-1]
-
-    return None
+    return "", ""
 
 
-def build_context_line(lines: list[str], hit_index: int) -> str:
-    """Build a compact multi-line context string around a page hit.
+def find_best_amount_in_lines(
+    lines: list[str],
+    start_index: int,
+    end_index: int,
+    max_padding: int = 4,
+) -> tuple[str | None, tuple[int, int]]:
+    """Find the nearest valid amount around a match window."""
 
-    :param lines: All text lines from the current PDF page.
-    :param hit_index: Index of the matching line.
-    :returns: Joined context string for reporting output.
-    """
+    for padding in range(0, max_padding + 1):
+        expanded_start = max(0, start_index - padding)
+        expanded_end = min(len(lines), end_index + padding)
+        text = " ".join(lines[expanded_start:expanded_end])
 
-    start = max(0, hit_index - 1)
-    end = min(len(lines), hit_index + 2)
-    context = " | ".join(line.strip() for line in lines[start:end] if line.strip())
-    return context.strip()
+        amount = find_best_amount_in_text(text)
+        if amount is not None:
+            return amount, (expanded_start, expanded_end)
+
+    return None, (start_index, end_index)
 
 
 def find_matches_in_page(
@@ -195,21 +221,11 @@ def find_matches_in_page(
     statement_label: str,
     page_number: int,
 ) -> list[MatchResult]:
-    """Collect deduplicated contract matches for a single PDF page.
-
-    The surrounding context is used to infer the booking amount and booking
-    date near the matched contract token.
-
-    :param page_text: Full text extracted from one PDF page.
-    :param contract_numbers: Contract numbers to search for.
-    :param statement_file: Name of the source PDF file.
-    :param statement_label: Human-readable statement identifier.
-    :param page_number: One-based page number in the PDF.
-    :returns: All unique matches found on the page.
-    """
+    """Collect deduplicated contract matches for a single page."""
 
     results: list[MatchResult] = []
     lines = page_text.splitlines()
+    normalized_page = normalize_text_for_search(page_text)
 
     normalized_contracts = {
         contract_number: normalize_contract_token(contract_number)
@@ -219,40 +235,50 @@ def find_matches_in_page(
 
     seen_keys: set[tuple[str, int, str]] = set()
 
-    for line_index, line in enumerate(lines):
-        normalized_line = normalize_text_for_search(line)
+    for contract_number, normalized_contract in normalized_contracts.items():
+        if not normalized_contract:
+            continue
 
-        for contract_number, normalized_contract in normalized_contracts.items():
-            if not normalized_contract:
-                continue
+        if normalized_contract not in normalized_page:
+            continue
 
-            if normalized_contract not in normalized_line:
-                continue
+        windows = find_contract_windows(lines, normalized_contract)
+        best_window = choose_best_window(lines, windows)
 
-            amount = find_best_amount_in_context(lines, line_index)
-            if amount is None:
-                continue
+        if best_window is None:
+            continue
 
-            booking_date, booking_month = find_best_date_in_context(lines, line_index)
-            context_line = build_context_line(lines, line_index)
-            unique_key = (contract_number, page_number, context_line)
+        start_index, end_index = best_window
 
-            if unique_key in seen_keys:
-                continue
+        amount, context_window = find_best_amount_in_lines(lines, start_index, end_index)
+        if amount is None:
+            continue
 
-            seen_keys.add(unique_key)
+        context_start, context_end = context_window
+        booking_date, booking_month = find_best_date_in_lines(
+            lines,
+            context_start,
+            context_end,
+        )
+        context_text = build_context_text(lines, context_start, context_end)
 
-            results.append(
-                MatchResult(
-                    contract_number=contract_number,
-                    amount=amount,
-                    statement_file=statement_file,
-                    statement_label=statement_label,
-                    page_number=page_number,
-                    booking_date=booking_date,
-                    booking_month=booking_month,
-                    line_text=context_line,
-                )
+        unique_key = (contract_number, page_number, context_text)
+        if unique_key in seen_keys:
+            continue
+
+        seen_keys.add(unique_key)
+
+        results.append(
+            MatchResult(
+                contract_number=contract_number,
+                amount=amount,
+                statement_file=statement_file,
+                statement_label=statement_label,
+                page_number=page_number,
+                booking_date=booking_date,
+                booking_month=booking_month,
+                line_text=context_text,
             )
+        )
 
     return results

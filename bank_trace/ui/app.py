@@ -10,7 +10,7 @@ from tkinter import filedialog, messagebox
 from typing import Any
 
 import customtkinter as ctk
-from PIL import ImageTk
+from PIL import Image
 
 from bank_trace.config.settings import (
     APP_HEIGHT,
@@ -53,7 +53,7 @@ class BankTraceApp(ctk.CTk):
         self.results: list[MatchResult] = []
         self.report_path = Path(DEFAULT_REPORT_FILE)
 
-        self.preview_image: ImageTk.PhotoImage | None = None
+        self.preview_image: Image.PhotoImage | None = None
         self.preview_page_index = 0
         self.preview_page_count = 0
 
@@ -375,7 +375,11 @@ class BankTraceApp(ctk.CTk):
 
         image.thumbnail((760, 760))
 
-        self.preview_image = ImageTk.PhotoImage(image)
+        self.preview_image = ctk.CTkImage(
+            light_image=image,
+            dark_image=image,
+            size=image.size,
+        )
         preview_label.configure(text="", image=self.preview_image)
 
     def _update_preview_navigation(self) -> None:
