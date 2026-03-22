@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
@@ -21,9 +21,9 @@ class ReportService:
         output_path: Path,
         results: list[MatchResult],
     ) -> None:
-        """Generate a PDF report for the provided match results.
+        """Generate a report PDF for the provided match results.
 
-        :param output_path: Destination path for the generated PDF.
+        :param output_path: Destination path of the generated report.
         :param results: Matches that should appear in the report.
         """
 
@@ -31,11 +31,11 @@ class ReportService:
 
         document = SimpleDocTemplate(
             str(output_path),
-            pagesize=A4,
-            leftMargin=15 * mm,
-            rightMargin=15 * mm,
-            topMargin=15 * mm,
-            bottomMargin=15 * mm,
+            pagesize=landscape(A4),
+            leftMargin=12 * mm,
+            rightMargin=12 * mm,
+            topMargin=12 * mm,
+            bottomMargin=12 * mm,
         )
 
         styles = getSampleStyleSheet()
@@ -44,13 +44,13 @@ class ReportService:
         small_style = ParagraphStyle(
             "SmallText",
             parent=styles["BodyText"],
-            fontSize=8,
-            leading=10,
+            fontSize=7,
+            leading=9,
         )
 
         content = [
             Paragraph("Bank Trace Report", title_style),
-            Spacer(1, 8 * mm),
+            Spacer(1, 6 * mm),
         ]
 
         if not results:
@@ -59,7 +59,16 @@ class ReportService:
             return
 
         table_data = [
-            ["Contract Number", "Amount", "Statement", "File", "Page", "Source Line"]
+            [
+                "Contract Number",
+                "Amount",
+                "Date",
+                "Month",
+                "Statement",
+                "File",
+                "Page",
+                "Source Line",
+            ]
         ]
 
         for result in results:
@@ -67,6 +76,8 @@ class ReportService:
                 [
                     Paragraph(self._escape(result.contract_number), small_style),
                     Paragraph(self._escape(result.amount), small_style),
+                    Paragraph(self._escape(result.booking_date), small_style),
+                    Paragraph(self._escape(result.booking_month), small_style),
                     Paragraph(self._escape(result.statement_label), small_style),
                     Paragraph(self._escape(result.statement_file), small_style),
                     Paragraph(str(result.page_number), small_style),
@@ -76,7 +87,16 @@ class ReportService:
 
         table = Table(
             table_data,
-            colWidths=[28 * mm, 22 * mm, 28 * mm, 35 * mm, 12 * mm, 55 * mm],
+            colWidths=[
+                30 * mm,
+                20 * mm,
+                22 * mm,
+                22 * mm,
+                24 * mm,
+                35 * mm,
+                10 * mm,
+                90 * mm,
+            ],
             repeatRows=1,
         )
 

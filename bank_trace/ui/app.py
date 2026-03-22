@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Any
@@ -20,8 +23,10 @@ from bank_trace.config.settings import (
 )
 from bank_trace.core.models import MatchResult
 from bank_trace.core.scanner import StatementScanner
-from bank_trace.services.pdf_service import render_pdf_page_to_image
-from bank_trace.services.print_service import PrintService
+from bank_trace.services.pdf_service import (
+    get_pdf_page_count,
+    render_pdf_page_to_image,
+)
 from bank_trace.services.report_service import ReportService
 from bank_trace.services.storage_service import StorageService
 
@@ -30,7 +35,7 @@ class BankTraceApp(ctk.CTk):
     """Main desktop application for scanning bank statement PDFs."""
 
     def __init__(self) -> None:
-        """Initialize the main window, services, and widget references."""
+        """Initialize the main window, services, and preview state."""
 
         super().__init__()
 
@@ -39,30 +44,38 @@ class BankTraceApp(ctk.CTk):
 
         self.title(APP_NAME)
         self.geometry(f"{APP_WIDTH}x{APP_HEIGHT}")
-        self.minsize(1100, 700)
+        self.minsize(1180, 760)
 
         self.storage_service = StorageService()
         self.scanner = StatementScanner()
         self.report_service = ReportService()
-        self.print_service = PrintService()
 
         self.results: list[MatchResult] = []
-        self.preview_image: ImageTk.PhotoImage | None = None
         self.report_path = Path(DEFAULT_REPORT_FILE)
+
+        self.preview_image: ImageTk.PhotoImage | None = None
+        self.preview_page_index = 0
+        self.preview_page_count = 0
 
         self.left_frame: ctk.CTkFrame | None = None
         self.right_frame: ctk.CTkFrame | None = None
+
         self.folder_entry: ctk.CTkEntry | None = None
         self.contracts_textbox: ctk.CTkTextbox | None = None
         self.output_entry: ctk.CTkEntry | None = None
+
         self.preview_label: ctk.CTkLabel | None = None
         self.status_label: ctk.CTkLabel | None = None
+        self.page_label: ctk.CTkLabel | None = None
+        self.prev_button: ctk.CTkButton | None = None
+        self.next_button: ctk.CTkButton | None = None
 
         self._build_layout()
         self._load_saved_config()
+        self._update_preview_navigation()
 
     def _build_layout(self) -> None:
-        """Create the two-column application layout."""
+        """Create the two-column layout of the main application window."""
 
         self.grid_columnconfigure(0, weight=3)
         self.grid_columnconfigure(1, weight=4)
@@ -81,22 +94,21 @@ class BankTraceApp(ctk.CTk):
         self._build_right_panel()
 
     def _build_left_panel(self) -> None:
-        """Build the control panel for input, actions, and printing."""
+        """Build the input and action controls shown on the left side."""
 
-        if self.left_frame is None:
-            raise RuntimeError("Left frame has not been initialized.")
+        left_frame = self._require_widget(self.left_frame)
 
         title_label = ctk.CTkLabel(
-            self.left_frame,
+            left_frame,
             text=APP_NAME,
             font=ctk.CTkFont(size=24, weight="bold"),
         )
         title_label.grid(row=0, column=0, padx=16, pady=(16, 10), sticky="w")
 
-        folder_label = ctk.CTkLabel(self.left_frame, text="PDF folder")
+        folder_label = ctk.CTkLabel(left_frame, text="PDF folder")
         folder_label.grid(row=1, column=0, padx=16, pady=(10, 4), sticky="w")
 
-        folder_frame = ctk.CTkFrame(self.left_frame, fg_color="transparent")
+        folder_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
         folder_frame.grid(row=2, column=0, padx=16, pady=(0, 10), sticky="ew")
         folder_frame.grid_columnconfigure(0, weight=1)
 
@@ -111,17 +123,16 @@ class BankTraceApp(ctk.CTk):
         )
         folder_button.grid(row=0, column=1, sticky="e")
 
-        contracts_label = ctk.CTkLabel(self.left_frame, text="Contract numbers")
+        contracts_label = ctk.CTkLabel(left_frame, text="Contract numbers")
         contracts_label.grid(row=3, column=0, padx=16, pady=(10, 4), sticky="w")
 
-        self.contracts_textbox = ctk.CTkTextbox(self.left_frame, height=220)
+        self.contracts_textbox = ctk.CTkTextbox(left_frame, height=240)
         self.contracts_textbox.grid(row=4, column=0, padx=16, pady=(0, 10), sticky="ew")
-        self.contracts_textbox.insert("1.0", "Enter one contract number per line...")
 
-        output_label = ctk.CTkLabel(self.left_frame, text="Output PDF")
+        output_label = ctk.CTkLabel(left_frame, text="Output PDF")
         output_label.grid(row=5, column=0, padx=16, pady=(10, 4), sticky="w")
 
-        output_frame = ctk.CTkFrame(self.left_frame, fg_color="transparent")
+        output_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
         output_frame.grid(row=6, column=0, padx=16, pady=(0, 10), sticky="ew")
         output_frame.grid_columnconfigure(0, weight=1)
 
@@ -137,8 +148,8 @@ class BankTraceApp(ctk.CTk):
         )
         output_button.grid(row=0, column=1, sticky="e")
 
-        button_frame = ctk.CTkFrame(self.left_frame, fg_color="transparent")
-        button_frame.grid(row=7, column=0, padx=16, pady=(10, 16), sticky="ew")
+        button_frame = ctk.CTkFrame(left_frame, fg_color="transparent")
+        button_frame.grid(row=7, column=0, padx=16, pady=(10, 10), sticky="ew")
         button_frame.grid_columnconfigure((0, 1), weight=1)
 
         save_button = ctk.CTkButton(
@@ -155,52 +166,72 @@ class BankTraceApp(ctk.CTk):
         )
         scan_button.grid(row=0, column=1, padx=(8, 0), sticky="ew")
 
-        print_button = ctk.CTkButton(
-            self.left_frame,
-            text="Print report",
-            command=self._print_report,
+        open_button = ctk.CTkButton(
+            left_frame,
+            text="Open PDF",
+            command=self._open_report,
         )
-        print_button.grid(row=8, column=0, padx=16, pady=(0, 16), sticky="ew")
+        open_button.grid(row=8, column=0, padx=16, pady=(0, 16), sticky="ew")
 
     def _build_right_panel(self) -> None:
-        """Build the preview and status area of the application."""
+        """Build the preview, pagination, and status area."""
 
-        if self.right_frame is None:
-            raise RuntimeError("Right frame has not been initialized.")
+        right_frame = self._require_widget(self.right_frame)
 
         header = ctk.CTkLabel(
-            self.right_frame,
+            right_frame,
             text="Preview",
             font=ctk.CTkFont(size=20, weight="bold"),
         )
         header.grid(row=0, column=0, padx=16, pady=(16, 8), sticky="w")
 
         self.preview_label = ctk.CTkLabel(
-            self.right_frame,
+            right_frame,
             text="No preview available.",
             anchor="center",
         )
         self.preview_label.grid(row=1, column=0, padx=16, pady=8, sticky="nsew")
 
+        nav_frame = ctk.CTkFrame(right_frame, fg_color="transparent")
+        nav_frame.grid(row=2, column=0, padx=16, pady=(0, 8), sticky="ew")
+        nav_frame.grid_columnconfigure(1, weight=1)
+
+        self.prev_button = ctk.CTkButton(
+            nav_frame,
+            text="Previous",
+            width=110,
+            command=self._show_previous_preview_page,
+        )
+        self.prev_button.grid(row=0, column=0, padx=(0, 8), sticky="w")
+
+        self.page_label = ctk.CTkLabel(
+            nav_frame,
+            text="Page 0 / 0",
+            anchor="center",
+        )
+        self.page_label.grid(row=0, column=1, sticky="ew")
+
+        self.next_button = ctk.CTkButton(
+            nav_frame,
+            text="Next",
+            width=110,
+            command=self._show_next_preview_page,
+        )
+        self.next_button.grid(row=0, column=2, padx=(8, 0), sticky="e")
+
         self.status_label = ctk.CTkLabel(
-            self.right_frame,
+            right_frame,
             text="Ready.",
             anchor="w",
         )
-        self.status_label.grid(row=2, column=0, padx=16, pady=(8, 16), sticky="ew")
+        self.status_label.grid(row=3, column=0, padx=16, pady=(8, 16), sticky="ew")
 
     def _load_saved_config(self) -> None:
-        """Populate the UI with previously persisted settings.
+        """Populate the form with the last saved configuration."""
 
-        :raises RuntimeError: If required widgets are not initialized yet.
-        """
-
-        if (
-            self.folder_entry is None
-            or self.contracts_textbox is None
-            or self.output_entry is None
-        ):
-            raise RuntimeError("UI widgets have not been initialized.")
+        folder_entry = self._require_widget(self.folder_entry)
+        contracts_textbox = self._require_widget(self.contracts_textbox)
+        output_entry = self._require_widget(self.output_entry)
 
         config = self.storage_service.load_config()
 
@@ -208,20 +239,19 @@ class BankTraceApp(ctk.CTk):
         contract_numbers = config.get("contract_numbers", [])
         output_file = str(config.get("output_file", "")) or str(self.report_path)
 
-        self.folder_entry.delete(0, "end")
-        self.folder_entry.insert(0, folder)
+        folder_entry.delete(0, "end")
+        folder_entry.insert(0, folder)
 
-        self.contracts_textbox.delete("1.0", "end")
-        self.contracts_textbox.insert("1.0", "\n".join(contract_numbers))
+        contracts_textbox.delete("1.0", "end")
+        contracts_textbox.insert("1.0", "\n".join(contract_numbers))
 
-        self.output_entry.delete(0, "end")
-        self.output_entry.insert(0, output_file)
+        output_entry.delete(0, "end")
+        output_entry.insert(0, output_file)
 
     def _save_config(self) -> None:
-        """Persist the current form state and notify the user."""
+        """Persist the current form values and notify the user."""
 
-        if self.status_label is None:
-            raise RuntimeError("Status label has not been initialized.")
+        status_label = self._require_widget(self.status_label)
 
         folder = self._require_widget(self.folder_entry).get().strip()
         contract_numbers = self._get_contract_numbers()
@@ -233,7 +263,7 @@ class BankTraceApp(ctk.CTk):
             output_file=output_file,
         )
 
-        self.status_label.configure(text="Settings saved.")
+        status_label.configure(text="Settings saved.")
         messagebox.showinfo(APP_NAME, "Settings have been saved locally.")
 
     def _select_folder(self) -> None:
@@ -249,7 +279,7 @@ class BankTraceApp(ctk.CTk):
         folder_entry.insert(0, selected_folder)
 
     def _select_output_file(self) -> None:
-        """Open a save dialog and update the output file input field."""
+        """Open a save dialog and update the output PDF field."""
 
         output_entry = self._require_widget(self.output_entry)
 
@@ -265,7 +295,7 @@ class BankTraceApp(ctk.CTk):
         output_entry.insert(0, selected_file)
 
     def _get_contract_numbers(self) -> list[str]:
-        """Return cleaned contract numbers from the multiline textbox.
+        """Return cleaned contract numbers from the multiline input box.
 
         :returns: Non-empty, stripped contract numbers in input order.
         """
@@ -276,9 +306,10 @@ class BankTraceApp(ctk.CTk):
         return [line for line in lines if line]
 
     def _run_scan(self) -> None:
-        """Scan the selected PDFs, generate a report, and refresh the preview."""
+        """Scan the selected PDFs, generate the report, and refresh preview."""
 
         status_label = self._require_widget(self.status_label)
+
         folder_text = self._require_widget(self.folder_entry).get().strip()
         output_text = self._require_widget(self.output_entry).get().strip()
         contract_numbers = self._get_contract_numbers()
@@ -309,7 +340,11 @@ class BankTraceApp(ctk.CTk):
             )
 
             self.report_path = output_path
+            self.preview_page_index = 0
+            self.preview_page_count = get_pdf_page_count(self.report_path)
+
             self._update_preview()
+            self._update_preview_navigation()
 
             status_label.configure(
                 text=f"Done. {len(self.results)} match(es) written to {output_path.name}."
@@ -323,7 +358,7 @@ class BankTraceApp(ctk.CTk):
             messagebox.showerror(APP_NAME, f"An error occurred:\n{exc}")
 
     def _update_preview(self) -> None:
-        """Render the first report page as an image preview."""
+        """Render the currently selected report page into the preview pane."""
 
         preview_label = self._require_widget(self.preview_label)
 
@@ -334,25 +369,77 @@ class BankTraceApp(ctk.CTk):
 
         image = render_pdf_page_to_image(
             pdf_path=self.report_path,
-            page_number=0,
+            page_number=self.preview_page_index,
             zoom=PREVIEW_ZOOM,
         )
 
-        image.thumbnail((700, 700))
+        image.thumbnail((760, 760))
 
         self.preview_image = ImageTk.PhotoImage(image)
         preview_label.configure(text="", image=self.preview_image)
 
-    def _print_report(self) -> None:
-        """Send the generated report to the default printer."""
+    def _update_preview_navigation(self) -> None:
+        """Refresh preview page labels and navigation button states."""
 
-        status_label = self._require_widget(self.status_label)
+        page_label = self._require_widget(self.page_label)
+        prev_button = self._require_widget(self.prev_button)
+        next_button = self._require_widget(self.next_button)
+
+        if self.preview_page_count <= 0:
+            page_label.configure(text="Page 0 / 0")
+            prev_button.configure(state="disabled")
+            next_button.configure(state="disabled")
+            return
+
+        page_label.configure(
+            text=f"Page {self.preview_page_index + 1} / {self.preview_page_count}"
+        )
+
+        prev_button.configure(
+            state="normal" if self.preview_page_index > 0 else "disabled"
+        )
+        next_button.configure(
+            state="normal"
+            if self.preview_page_index < self.preview_page_count - 1
+            else "disabled"
+        )
+
+    def _show_previous_preview_page(self) -> None:
+        """Move the preview to the previous report page when available."""
+
+        if self.preview_page_index <= 0:
+            return
+
+        self.preview_page_index -= 1
+        self._update_preview()
+        self._update_preview_navigation()
+
+    def _show_next_preview_page(self) -> None:
+        """Move the preview to the next report page when available."""
+
+        if self.preview_page_index >= self.preview_page_count - 1:
+            return
+
+        self.preview_page_index += 1
+        self._update_preview()
+        self._update_preview_navigation()
+
+    def _open_report(self) -> None:
+        """Open the generated report with the operating system default viewer."""
+
+        if not self.report_path.exists():
+            messagebox.showwarning(APP_NAME, "No report file exists yet.")
+            return
 
         try:
-            self.print_service.print_pdf(self.report_path)
-            status_label.configure(text="Print command sent.")
-        except (FileNotFoundError, OSError, RuntimeError) as exc:
-            messagebox.showerror(APP_NAME, f"Printing failed:\n{exc}")
+            if sys.platform.startswith("win"):
+                os.startfile(str(self.report_path))  # type: ignore[attr-defined]
+            elif sys.platform == "darwin":
+                subprocess.run(["open", str(self.report_path)], check=True)
+            else:
+                subprocess.run(["xdg-open", str(self.report_path)], check=True)
+        except (OSError, subprocess.SubprocessError) as exc:
+            messagebox.showerror(APP_NAME, f"Could not open PDF:\n{exc}")
 
     @staticmethod
     def _require_widget(widget: Any) -> Any:

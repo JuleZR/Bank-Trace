@@ -24,12 +24,23 @@ def extract_text_per_page(pdf_path: Path) -> list[str]:
     return texts
 
 
+def get_pdf_page_count(pdf_path: Path) -> int:
+    """Return the number of pages in a PDF document.
+
+    :param pdf_path: Path to the PDF file.
+    :returns: Total page count.
+    """
+
+    with fitz.open(pdf_path) as document:
+        return len(document)
+
+
 def render_pdf_page_to_image(
     pdf_path: Path,
     page_number: int = 0,
     zoom: float = 1.5,
 ) -> Image.Image:
-    """Render a PDF page to a Pillow image for UI preview purposes.
+    """Render a PDF page to a Pillow image for preview display.
 
     :param pdf_path: Path to the PDF file.
     :param page_number: Zero-based page index to render.
